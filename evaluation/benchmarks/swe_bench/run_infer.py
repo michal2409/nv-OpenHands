@@ -627,6 +627,13 @@ def complete_runtime(
     If you need to do something in the sandbox to get the correctness metric after
     the agent has run, modify this function.
     """
+    start_time = time.monotonic()
+    extraction_timeout = int(os.environ.get('PATCH_EXTRACTION_TIMEOUT', '60'))
+
+    def remaining_time() -> float:
+        remaining = extraction_timeout - (time.monotonic() - start_time)
+        return max(1, remaining)
+
     logger.info('-' * 30)
     logger.info('BEGIN Runtime Completion Fn')
     logger.info('-' * 30)
@@ -640,7 +647,7 @@ def complete_runtime(
         is_static=True,
         cwd=workspace_path,
     )
-    action.set_hard_timeout(600)
+    action.set_hard_timeout(remaining_time())
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
@@ -655,7 +662,7 @@ def complete_runtime(
         is_static=True,
         cwd=workspace_path,
     )
-    action.set_hard_timeout(600)
+    action.set_hard_timeout(remaining_time())
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
@@ -673,7 +680,7 @@ def complete_runtime(
                 is_static=True,
                 cwd=workspace_path,
             )
-            action.set_hard_timeout(600)
+            action.set_hard_timeout(remaining_time())
             logger.info(action, extra={'msg_type': 'ACTION'})
             obs = runtime.run_action(action)
             logger.info(obs, extra={'msg_type': 'OBSERVATION'})
@@ -688,7 +695,7 @@ def complete_runtime(
         is_static=True,
         cwd=workspace_path,
     )
-    action.set_hard_timeout(600)
+    action.set_hard_timeout(remaining_time())
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
@@ -703,7 +710,7 @@ def complete_runtime(
         is_static=True,
         cwd=workspace_path,
     )
-    action.set_hard_timeout(600)
+    action.set_hard_timeout(remaining_time())
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
@@ -721,7 +728,7 @@ def complete_runtime(
             is_static=True,
             cwd=workspace_path,
         )
-        action.set_hard_timeout(max(300 + 100 * n_retries, 600))
+        action.set_hard_timeout(remaining_time())
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
@@ -730,7 +737,7 @@ def complete_runtime(
             if obs.exit_code == 0:
                 # Read the patch file
                 action = FileReadAction(path=os.path.join(workspace_path, 'patch.diff'))
-                action.set_hard_timeout(max(300 + 100 * n_retries, 600))
+                action.set_hard_timeout(remaining_time())
                 logger.info(action, extra={'msg_type': 'ACTION'})
                 obs = runtime.run_action(action)
                 logger.info(obs, extra={'msg_type': 'OBSERVATION'})
@@ -750,20 +757,15 @@ def complete_runtime(
                         directory + '/',
                     )
                     portable_path = directory + '/patch.diff'
-                    # Preserve the original extraction fallback's retry budget,
-                    # including the helper's internal Git deadline.
-                    timeout = max(300 + 100 * n_retries, 600)
+                    # Give the helper the remaining extraction budget.
+                    timeout = remaining_time()
                     # Only this fresh shell needs the task Python for conversion.
                     task_path = 'PATH=/testbed/.venv/bin:$PATH ' if DATASET_TYPE == 'R2E-Gym' else ''
-                    action = CmdRunAction(
-                        command=task_path + shlex.join([
-                            'python', directory + '/portable_patch.py', '.',
-                            'patch.diff', portable_path, str(timeout),
-                        ]),
-                        is_static=True,
-                        cwd=workspace_path,
-                    )
-                    action.set_hard_timeout(timeout)
+                    action = CmdRunAction(command=task_path + shlex.join([
+                        'python', directory + '/portable_patch.py', '.',
+                        'patch.diff', portable_path, str(timeout),
+                    ]), is_static=True, cwd=workspace_path)
+                    action.set_hard_timeout(remaining_time())
                     logger.info(action, extra={'msg_type': 'ACTION'})
                     obs = runtime.run_action(action)
                     assert_and_raise(
@@ -772,7 +774,7 @@ def complete_runtime(
                     )
                     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
                     action = FileReadAction(path=portable_path)
-                    action.set_hard_timeout(timeout)
+                    action.set_hard_timeout(remaining_time())
                     obs = runtime.run_action(action)
                     assert_and_raise(
                         isinstance(obs, FileReadObservation),
@@ -785,10 +787,10 @@ def complete_runtime(
                     assert_and_raise(False, f'Unexpected observation type: {str(obs)}')
             else:
                 logger.info('Failed to get git diff, retrying...')
-                sleep_if_should_continue(10)
+                sleep_if_should_continue(min(10, remaining_time()))
         elif isinstance(obs, ErrorObservation):
             logger.error(f'Error occurred: {obs.content}. Retrying...')
-            sleep_if_should_continue(10)
+            sleep_if_should_continue(min(10, remaining_time()))
         else:
             assert_and_raise(False, f'Unexpected observation type: {str(obs)}')
 
