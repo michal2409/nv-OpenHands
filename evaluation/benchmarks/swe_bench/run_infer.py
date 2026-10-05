@@ -634,63 +634,12 @@ def complete_runtime(
     workspace_dir_name = _get_swebench_workspace_dir_name(instance)
     workspace_path = _get_workspace_path(instance, workspace_dir_name)
 
-    action = CmdRunAction(command=f'cd {workspace_path}')
-    action.set_hard_timeout(600)
-    logger.info(action, extra={'msg_type': 'ACTION'})
-    obs = runtime.run_action(action)
-    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-
-    if obs.exit_code == -1:
-        # The previous command is still running — try C-c (SIGINT).
-        # is_input=True is required so the signal reaches the tmux pane
-        # instead of being rejected by the "previous command still running" guard.
-        logger.info('The previous command is still running, sending C-c (is_input=True)...')
-        action = CmdRunAction(command='C-c', is_input=True)
-        obs = runtime.run_action(action)
-        logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-
-        action = CmdRunAction(command=f'cd {workspace_path}')
-        action.set_hard_timeout(600)
-        logger.info(action, extra={'msg_type': 'ACTION'})
-        obs = runtime.run_action(action)
-        logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-
-    if obs.exit_code == -1:
-        # C-c didn't work — try sending C-c twice (some processes like pytest
-        # need two SIGINTs: the first triggers graceful shutdown, the second aborts).
-        logger.info('C-c failed, sending C-c twice...')
-        action = CmdRunAction(command='C-c', is_input=True)
-        runtime.run_action(action)
-        action = CmdRunAction(command='C-c', is_input=True)
-        obs = runtime.run_action(action)
-        logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-
-        action = CmdRunAction(command=f'cd {workspace_path}')
-        action.set_hard_timeout(600)
-        logger.info(action, extra={'msg_type': 'ACTION'})
-        obs = runtime.run_action(action)
-        logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-
-    if obs.exit_code == -1:
-        # Multiple C-c didn't work — try C-z (SIGTSTP) to suspend.
-        # If the process suspends, the shell returns a prompt and we can proceed.
-        logger.info('Multiple C-c failed, sending C-z (is_input=True) to suspend...')
-        action = CmdRunAction(command='C-z', is_input=True)
-        obs = runtime.run_action(action)
-        logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-
-        action = CmdRunAction(command=f'cd {workspace_path}')
-        action.set_hard_timeout(600)
-        logger.info(action, extra={'msg_type': 'ACTION'})
-        obs = runtime.run_action(action)
-        logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-
-    assert_and_raise(
-        isinstance(obs, CmdOutputObservation) and obs.exit_code == 0,
-        f'Failed to cd to {workspace_path}: {str(obs)}',
+    # Use fresh sessions for extraction; leave the agent shell untouched.
+    action = CmdRunAction(
+        command='git config --global core.pager ""',
+        is_static=True,
+        cwd=workspace_path,
     )
-
-    action = CmdRunAction(command='git config --global core.pager ""')
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
@@ -701,7 +650,11 @@ def complete_runtime(
     )
 
     # First check for any git repositories in subdirectories
-    action = CmdRunAction(command='find . -type d -name .git -not -path "./.git"')
+    action = CmdRunAction(
+        command='find . -type d -name .git -not -path "./.git"',
+        is_static=True,
+        cwd=workspace_path,
+    )
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
@@ -715,7 +668,11 @@ def complete_runtime(
     if git_dirs:
         # Remove all .git directories in subdirectories
         for git_dir in git_dirs:
-            action = CmdRunAction(command=f'rm -rf "{git_dir}"')
+            action = CmdRunAction(
+                command=f'rm -rf "{git_dir}"',
+                is_static=True,
+                cwd=workspace_path,
+            )
             action.set_hard_timeout(600)
             logger.info(action, extra={'msg_type': 'ACTION'})
             obs = runtime.run_action(action)
@@ -726,7 +683,11 @@ def complete_runtime(
             )
 
     # add all files
-    action = CmdRunAction(command='git add -A')
+    action = CmdRunAction(
+        command='git add -A',
+        is_static=True,
+        cwd=workspace_path,
+    )
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
@@ -737,7 +698,11 @@ def complete_runtime(
     )
 
     # Remove binary files from git staging
-    action = CmdRunAction(command=remove_binary_files_from_git())
+    action = CmdRunAction(
+        command=remove_binary_files_from_git(),
+        is_static=True,
+        cwd=workspace_path,
+    )
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
@@ -752,7 +717,9 @@ def complete_runtime(
     portable = False
     while n_retries < 5:
         action = CmdRunAction(
-            command=f'git diff --no-color --cached {instance["base_commit"]} > patch.diff'
+            command=f'git diff --no-color --cached {instance["base_commit"]} > patch.diff',
+            is_static=True,
+            cwd=workspace_path,
         )
         action.set_hard_timeout(max(300 + 100 * n_retries, 600))
         logger.info(action, extra={'msg_type': 'ACTION'})
@@ -762,7 +729,7 @@ def complete_runtime(
         if isinstance(obs, CmdOutputObservation):
             if obs.exit_code == 0:
                 # Read the patch file
-                action = FileReadAction(path='patch.diff')
+                action = FileReadAction(path=os.path.join(workspace_path, 'patch.diff'))
                 action.set_hard_timeout(max(300 + 100 * n_retries, 600))
                 logger.info(action, extra={'msg_type': 'ACTION'})
                 obs = runtime.run_action(action)
@@ -786,10 +753,16 @@ def complete_runtime(
                     # Preserve the original extraction fallback's retry budget,
                     # including the helper's internal Git deadline.
                     timeout = max(300 + 100 * n_retries, 600)
-                    action = CmdRunAction(command=shlex.join([
-                        'python', directory + '/portable_patch.py', '.',
-                        'patch.diff', portable_path, str(timeout),
-                    ]))
+                    # Only this fresh shell needs the task Python for conversion.
+                    task_path = 'PATH=/testbed/.venv/bin:$PATH ' if DATASET_TYPE == 'R2E-Gym' else ''
+                    action = CmdRunAction(
+                        command=task_path + shlex.join([
+                            'python', directory + '/portable_patch.py', '.',
+                            'patch.diff', portable_path, str(timeout),
+                        ]),
+                        is_static=True,
+                        cwd=workspace_path,
+                    )
                     action.set_hard_timeout(timeout)
                     logger.info(action, extra={'msg_type': 'ACTION'})
                     obs = runtime.run_action(action)
