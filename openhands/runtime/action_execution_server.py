@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -38,7 +39,8 @@ from openhands_aci.utils.diff import get_diff
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from uvicorn import run
+from uvicorn import Config, Server, run
+from uvicorn.main import STARTUP_FAILURE
 
 from openhands.core.config.mcp_config import MCPStdioServerConfig
 from openhands.core.exceptions import BrowserUnavailableException
@@ -2813,4 +2815,18 @@ if __name__ == '__main__':
     if os.getenv('LOG_JSON', '0') in ('1', 'true', 'True'):
         log_config = get_uvicorn_json_log_config()
 
-    run(app, host='0.0.0.0', port=args.port, log_config=log_config, use_colors=False)
+    listen_fd = os.environ.get('OPENHANDS_LISTEN_FD')
+    if listen_fd:
+        # LocalRuntime bound the port itself and passed the listening socket
+        # (local_runtime._create_server): serve on it instead of binding
+        # args.port a second time. The other runtimes start this server inside
+        # its own container, where binding here is right.
+        config = Config(
+            app, host='0.0.0.0', port=args.port, log_config=log_config, use_colors=False
+        )
+        server = Server(config)
+        server.run(sockets=[socket.socket(fileno=int(listen_fd))])
+        if not server.started:  # as uvicorn.run(): a failed startup exits 3, not 0
+            sys.exit(STARTUP_FAILURE)
+    else:
+        run(app, host='0.0.0.0', port=args.port, log_config=log_config, use_colors=False)

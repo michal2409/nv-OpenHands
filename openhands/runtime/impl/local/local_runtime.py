@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,6 @@ from openhands.runtime.impl.action_execution.action_execution_client import (
 from openhands.runtime.impl.docker.docker_runtime import (
     APP_PORT_RANGE_1,
     APP_PORT_RANGE_2,
-    EXECUTION_SERVER_PORT_RANGE,
     VSCODE_PORT_RANGE,
 )
 from openhands.runtime.plugins import PluginRequirement
@@ -639,8 +639,21 @@ def _create_server(
     )
     workspace_mount_path = temp_workspace
 
-    # Find available ports
-    execution_server_port = find_available_tcp_port(*EXECUTION_SERVER_PORT_RANGE)
+    # The execution server's port is bound HERE, atomically, as port 0 (kernel-
+    # assigned), and the listening socket is inherited by the server process:
+    # the port is ours from this line until uvicorn serves on it. Probing a
+    # random port, closing it and handing the NUMBER to the child (which binds
+    # it only after seconds of ActionExecutor init) left a window in which
+    # anything in the network namespace could take it. Every local runtime on
+    # a host shares that namespace (apptainer/enroot without --net), and the
+    # range overlaps the kernel's ephemeral ports; a foreign listener on the
+    # port makes /alive answer for the WRONG runtime.
+    listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as uvicorn's bind_socket
+    listen_sock.bind(('0.0.0.0', 0))
+    listen_sock.listen(2048)  # uvicorn's default backlog
+    listen_sock.set_inheritable(True)
+    execution_server_port = listen_sock.getsockname()[1]
     vscode_port = int(
         os.getenv('VSCODE_PORT') or str(find_available_tcp_port(*VSCODE_PORT_RANGE))
     )
@@ -680,6 +693,7 @@ def _create_server(
     env['OPENHANDS_REPO_PATH'] = code_repo_path
     env['LOCAL_RUNTIME_MODE'] = '1'
     env['VSCODE_PORT'] = str(vscode_port)
+    env['OPENHANDS_LISTEN_FD'] = str(listen_sock.fileno())
 
     # Prepend the interpreter's bin directory to PATH for subprocesses
     env['PATH'] = f'{_python_bin_path()}{os.pathsep}{env.get("PATH", "")}'
@@ -691,15 +705,21 @@ def _create_server(
 
     logger.debug(f'Updated PATH for subprocesses: {env["PATH"]}')
 
-    server_process = subprocess.Popen(  # noqa: S603
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        bufsize=1,
-        env=env,
-        cwd=code_repo_path,
-    )
+    try:
+        server_process = subprocess.Popen(  # noqa: S603
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1,
+            env=env,
+            cwd=code_repo_path,
+            pass_fds=(listen_sock.fileno(),),
+        )
+    finally:
+        # The child holds its own copy. A copy kept here would hold the port
+        # (and queue connections nobody serves) after the server exits.
+        listen_sock.close()
 
     log_thread_exit_event = threading.Event()
 
